@@ -1,22 +1,17 @@
-float gyroAngle = 0;
-int x, y, z;
-float left_intr = 0;
-int right_intr = 0;
-int h_intr = 0;
-unsigned int rotR = 0;
-unsigned int rotL = 0;
-unsigned long int tm;
-unsigned long int spdR = 210;
-unsigned long int spdL = 250;
-unsigned int dt = 0;
+#include "BluetoothSerial.h"
+// Проверка, что встроенный Bluetooth доступен на плате
+#if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED)
+#error Bluetooth is not enabled! Please run `make menuconfig` to and enable it
+#endif
+BluetoothSerial SerialBT;
 
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BNO055.h>
 #include <utility/imumaths.h>
-Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x28);
+Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x28); // гироскоп подключен по I2C к 21 и 22 gpio
 
 #include "Adafruit_VL53L0X.h"
-Adafruit_VL53L0X lox = Adafruit_VL53L0X();
+Adafruit_VL53L0X lox = Adafruit_VL53L0X();//подключаются ко второму I2C, 16 и 17 gpio
 Adafruit_VL53L0X lox2 = Adafruit_VL53L0X();
 VL53L0X_RangingMeasurementData_t measure;
 VL53L0X_RangingMeasurementData_t measure2;
@@ -45,20 +40,30 @@ String inString = "";
 long tmr_St = 0;
 char inChar;
 
-byte lidarData[360];
+float gyroAngle = 0;
+int x, y, z;
+float left_intr = 0;
+int right_intr = 0;
+int h_intr = 0;
+unsigned int rotR = 0;
+unsigned int rotL = 0;
+unsigned long int tm;
+unsigned long int spdR = 210;
+unsigned long int spdL = 250;
+unsigned int dt = 0;
 
 void setup() {
 
   Wire.begin();
   Serial.begin(9600);
-  Serial3.begin(9600);  //Скорость порта для связи Arduino с Serial3 модулем (15, 14) RX, TX
+  SerialBT.begin("ESP32"); //имя, которое будет отобрааться для других устройств
 
-  pinMode(8, OUTPUT);
-  pinMode(22, OUTPUT);
-  pinMode(23, OUTPUT);
-  digitalWrite(22, LOW);
-  digitalWrite(23, LOW);
-  digitalWrite(22, HIGH);
+  pinMode(25, OUTPUT);//пин подключения мосфета для мотора лидара
+  pinMode(32, OUTPUT);//пин для настройки 1-го дальномера
+  pinMode(33, OUTPUT);//для 2-го дальномера
+  digitalWrite(32, LOW);
+  digitalWrite(33, LOW);
+  digitalWrite(32, HIGH);
   if (!lox.begin()) {
     Serial.println("Failed to boot first VL53L0X");
     while (1)
@@ -69,7 +74,7 @@ void setup() {
   lox.setMeasurementTimingBudgetMicroSeconds(20000);
   lox.startRangeContinuous();
   Serial.println("first VL53L0X started");
-  digitalWrite(23, HIGH);
+  digitalWrite(33, HIGH);
   if (!lox2.begin()) {
     Serial.println("Failed to boot second VL53L0X");
     while (1)
@@ -91,10 +96,10 @@ void setup() {
   delay(1000);
   bno.setExtCrystalUse(true);
 
-  digitalWrite(8, HIGH);
-  attachInterrupt(digitalPinToInterrupt(18), Left_ISR, RISING);   //функция Left_ISR будет вызываться когда будет поступать прерывание от левого колеса
-  attachInterrupt(digitalPinToInterrupt(19), Right_ISR, RISING);  //функция Right_ISR будет вызываться когда будет поступать прерывание от правого колеса
-  attachInterrupt(digitalPinToInterrupt(2), H_ISR, RISING);
+  digitalWrite(25, HIGH);//если лидар правильно инициализировался, то начинает вращаться
+  attachInterrupt(digitalPinToInterrupt(26), Left_ISR, RISING);   //функция Left_ISR будет вызываться когда будет поступать прерывание от левого колеса
+  attachInterrupt(digitalPinToInterrupt(27), Right_ISR, RISING);  //функция Right_ISR будет вызываться когда будет поступать прерывание от правого колеса
+  attachInterrupt(digitalPinToInterrupt(23), H_ISR, RISING);//обработка прерываний для лидара
 }
 
 String getValue(String data, char separator, int index) {
@@ -117,16 +122,16 @@ String getValue(String data, char separator, int index) {
 void loop() {
   UpdateGyroKompas();
   GetLidarData();
-  if (Serial3.available())  // Слушаем порт
+  if (SerialBT.available())  // Слушаем порт
   {
-    char inChar = Serial3.read();  // Читаем символ с Serial3 модуля
+    char inChar = SerialBT.read();  // Читаем символ с SerialBT модуля
     //inString = inString + inChar;  // Переводим Char в String, набираем нужное кол-во символов
-    inString = Serial3.readStringUntil('\n');
+    inString = SerialBT.readStringUntil('\n');
     float part01 = getValue(inString, ' ', 0).toFloat();
     float part02 = getValue(inString, ' ', 1).toFloat();
 
-    /*Serial3.println(part01);
-      Serial3.println(part02);*/
+    /*SerialBT.println(part01);
+      SerialBT.println(part02);*/
     GetVector(part01, part02);
     currentX = xCoord;
     currentY = yCoord;
@@ -201,39 +206,39 @@ void GetLidarData() {
     if (measure.RangeStatus != 4 && (measure.RangeMilliMeter / 10 - 3) < 150) {  // если дальномер не ответил, то ничего не пишем в порт
       mapX1 = currentX + (measure.RangeMilliMeter / 10 - 3) * cos(angle + 180);
       mapY1 = currentY + (measure.RangeMilliMeter / 10 - 3) * sin(angle + 180);
-      Serial3.print(int(measure.RangeMilliMeter / 10 - 3));  //int(measure.RangeMilliMeter / 10 - 3)
-      Serial3.print("\t ");
-      Serial3.print(int(angle));  //int(angle)
-      Serial3.println("\t ");
-      /*Serial3.print(int(mapX1));
-      Serial3.print("\t ");
-      Serial3.print(int(mapY1));
-      Serial3.println("\t ");*/
-      /*Serial3.print(0);//int(measure.RangeMilliMeter / 10 - 3)
-      Serial3.print("\t ");
-      Serial3.print(0);//int(angle)
-      Serial3.print("\t ");
-      Serial3.print(int(measure2.RangeMilliMeter / 10 - 3));//int(measure2.RangeMilliMeter / 10 - 3)
-      Serial3.print("\t ");
-      Serial3.print(int(map(angle, 0, 360, 360, 0)));//int(angle-180)
-      Serial3.println("\t ");*/
+      SerialBT.print(int(measure.RangeMilliMeter / 10 - 3));  //int(measure.RangeMilliMeter / 10 - 3)
+      SerialBT.print("\t ");
+      SerialBT.print(int(angle));  //int(angle)
+      SerialBT.println("\t ");
+      /*SerialBT.print(int(mapX1));
+      SerialBT.print("\t ");
+      SerialBT.print(int(mapY1));
+      SerialBT.println("\t ");*/
+      /*SerialBT.print(0);//int(measure.RangeMilliMeter / 10 - 3)
+      SerialBT.print("\t ");
+      SerialBT.print(0);//int(angle)
+      SerialBT.print("\t ");
+      SerialBT.print(int(measure2.RangeMilliMeter / 10 - 3));//int(measure2.RangeMilliMeter / 10 - 3)
+      SerialBT.print("\t ");
+      SerialBT.print(int(map(angle, 0, 360, 360, 0)));//int(angle-180)
+      SerialBT.println("\t ");*/
       //Serial.print(" ");
     }
     if (measure2.RangeStatus != 4 && (measure2.RangeMilliMeter / 10) < 150) {
       mapX2 = currentX + (measure2.RangeMilliMeter / 10 - 3) * cos(angle);
       mapY2 = currentY + (measure2.RangeMilliMeter / 10 - 3) * sin(angle);
 
-      Serial3.print(int(measure2.RangeMilliMeter / 10));  //int(measure2.RangeMilliMeter / 10 - 3)
-      Serial3.print("\t ");
-      Serial3.print(int(angle2));  //int(angle-180)
-      Serial3.println("\t ");
+      SerialBT.print(int(measure2.RangeMilliMeter / 10));  //int(measure2.RangeMilliMeter / 10 - 3)
+      SerialBT.print("\t ");
+      SerialBT.print(int(angle2));  //int(angle-180)
+      SerialBT.println("\t ");
       //lidarData[(int)angle] = measure2.RangeMilliMeter/ 10 - 3;
-      /*Serial3.print(mapX2);
-      Serial3.print("\t ");
-      Serial3.println(mapY2);*/
+      /*SerialBT.print(mapX2);
+      SerialBT.print("\t ");
+      SerialBT.println(mapY2);*/
       //Serial.println(measure2.RangeMilliMeter / 10 - 3);
     }
-    //Serial3.println();
+    //SerialBT.println();
     /*Serial.print(" \t");
     Serial.print(angle);
     Serial.print(" \t");
@@ -254,7 +259,7 @@ void UpdateGyroKompas() {
     sensors_event_t event;
     bno.getEvent(&event);
     gyroAngle = event.orientation.x;
-    //Serial3.println(gyroAngle);
+    //SerialBT.println(gyroAngle);
     tmr = millis();  // сброс таймера
   }
 }
