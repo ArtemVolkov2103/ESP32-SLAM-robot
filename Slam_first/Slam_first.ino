@@ -5,10 +5,19 @@
 #endif
 BluetoothSerial SerialBT;
 
+#include<Wire.h>
+#define I2C_FREQ 400000
+#define SDA_1 21
+#define SCL_1 22
+#define SDA_2 18
+#define SCL_2 19
+TwoWire I2C_1 = TwoWire(0);
+TwoWire I2C_2 = TwoWire(1);
+
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BNO055.h>
 #include <utility/imumaths.h>
-Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x28); // гироскоп подключен по I2C к 21 и 22 gpio
+Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x28, &I2C_1); // гироскоп подключен по I2C к 21 и 22 gpio, адррес выставлен подтяжкой к земле
 
 #include "Adafruit_VL53L0X.h"
 Adafruit_VL53L0X lox = Adafruit_VL53L0X();//подключаются ко второму I2C, 16 и 17 gpio
@@ -52,54 +61,84 @@ unsigned long int spdR = 210;
 unsigned long int spdL = 250;
 unsigned int dt = 0;
 
+void Left_ISR() {
+  left_intr++;
+  rotL++;
+  //delay(2);
+}
+void Right_ISR() {
+  right_intr++;
+  rotR++;
+  //delay(2);
+}
+void  H_ISR() {//TODO: переместить вычисление времени между срабатываниями датчика холла в другое место, а то падает ошибка
+  int t = millis() - tmr_Lidar;
+  if (t > 2000) {
+    timeTo360 = t;
+    h_intr++;
+    loop_starts = true;
+    delta = 9;  //360 / (timeTo360 / lox_del);//360 / (timeTo360 / lox_del);
+    rotations += 1;
+    angle = 360;
+    angle2 = 180;
+
+    tmr_Lidar = millis();
+  }
+}
+
 void setup() {
-
-  Wire.begin();
   Serial.begin(9600);
-  SerialBT.begin("ESP32"); //имя, которое будет отобрааться для других устройств
-
-  pinMode(25, OUTPUT);//пин подключения мосфета для мотора лидара
-  pinMode(32, OUTPUT);//пин для настройки 1-го дальномера
-  pinMode(33, OUTPUT);//для 2-го дальномера
-  digitalWrite(32, LOW);
-  digitalWrite(33, LOW);
-  digitalWrite(32, HIGH);
-  if (!lox.begin()) {
-    Serial.println("Failed to boot first VL53L0X");
-    while (1)
-      ;
-  }
-  lox.setAddress((uint8_t)01);
-  //lox.configSensor(Adafruit_VL53L0X::VL53L0X_SENSE_HIGH_SPEED);
-  lox.setMeasurementTimingBudgetMicroSeconds(20000);
-  lox.startRangeContinuous();
-  Serial.println("first VL53L0X started");
-  digitalWrite(33, HIGH);
-  if (!lox2.begin()) {
-    Serial.println("Failed to boot second VL53L0X");
-    while (1)
-      ;
-  }
-  lox2.setAddress((uint8_t)02);
-  lox2.setMeasurementTimingBudgetMicroSeconds(20000);
-  lox2.startRangeContinuous();
-  Serial.println("second VL53L0X started");
-
-  /* Initialise the sensor */
+  SerialBT.begin("ESP32");            //имя, которое будет отобрааться для других устройств
+  I2C_1.begin(SDA_1, SCL_1, 400000);  // SDA pin 21, SCL pin 22 TTGO TQ
+  I2C_2.begin(SDA_2, SCL_2, 400000);  // SDA2 pin 18, SCL2 pin 19
+  delay(800);
   if (!bno.begin()) {
-    /* There was a problem detecting the BNO055 ... check your connections */
     Serial.println("Ooops, no BNO055 detected ... Check your wiring or I2C ADDR!");
     while (1)
       ;
   }
   Serial.println("BNO055 started");
+
   delay(1000);
   bno.setExtCrystalUse(true);
 
-  digitalWrite(25, HIGH);//если лидар правильно инициализировался, то начинает вращаться
-  attachInterrupt(digitalPinToInterrupt(26), Left_ISR, RISING);   //функция Left_ISR будет вызываться когда будет поступать прерывание от левого колеса
-  attachInterrupt(digitalPinToInterrupt(27), Right_ISR, RISING);  //функция Right_ISR будет вызываться когда будет поступать прерывание от правого колеса
-  attachInterrupt(digitalPinToInterrupt(23), H_ISR, RISING);//обработка прерываний для лидара
+  pinMode(4, OUTPUT);   //пин подключения мосфета для мотора лидара
+  pinMode(32, OUTPUT);  //пин для настройки 1-го дальномера
+  pinMode(33, OUTPUT);  //для 2-го дальномера
+
+  digitalWrite(33, HIGH);//перевожу дальномер в режим настройка адреса
+  digitalWrite(32, HIGH);
+  delay(10);
+  digitalWrite(33, LOW);
+  delay(10);
+  if (!lox.begin(0x30, false, &I2C_2)) {//присваиваю новый адрес
+    Serial.println("Failed to boot first VL53L0X");
+    while (1)
+      ;
+  }
+  lox.setMeasurementTimingBudgetMicroSeconds(20000);
+  lox.startRangeContinuous();
+  Serial.println("first VL53L0X started");
+  digitalWrite(33, HIGH);
+  delay(10);
+  if (!lox2.begin(0x31, false, &I2C_2)) {
+    Serial.println("Failed to boot second VL53L0X");
+    while (1)
+      ;
+  }
+  lox2.setMeasurementTimingBudgetMicroSeconds(20000);
+  lox2.startRangeContinuous();
+  Serial.println("second VL53L0X started");
+
+  delay(1000);//задержка нобходима для корректной инициализации датчиков по i2c
+
+  digitalWrite(4, HIGH);//если лидар правильно инициализировался, то начинает вращаться
+  pinMode(36, INPUT_PULLUP);
+  pinMode(39, INPUT_PULLUP);
+  pinMode(23, INPUT_PULLUP);
+  attachInterrupt(36, Left_ISR, RISING);   //функция Left_ISR будет вызываться когда будет поступать прерывание от левого колеса
+  attachInterrupt(39, Right_ISR, RISING);  //функция Right_ISR будет вызываться когда будет поступать прерывание от правого колеса
+  attachInterrupt(23, H_ISR, RISING);//обработка прерываний для лидара
 }
 
 String getValue(String data, char separator, int index) {
@@ -297,10 +336,7 @@ void Action(char act, float val) {
   }
 }
 
-void CalculateWay() {
-  if (lidarData[0] > lidarData[90] && lidarData[0] > lidarData[270]) {
-  }
-}
+
 
 void GoToAngle(float angle) {
 
@@ -355,10 +391,10 @@ bool Forward(float meters) {
       if (dir) spdL = 255 / rotation;
       else spdR = 255 / rotation;
     }
-    analogWrite(9, spdR);
-    analogWrite(10, 0);
-    analogWrite(11, spdL);
-    analogWrite(12, 0);
+    analogWrite(25, spdR);
+    analogWrite(26, 0);
+    analogWrite(27, spdL);
+    analogWrite(13, 0);
     return isCompited;
   } else {
     nextDist = 0;
@@ -375,10 +411,10 @@ bool Backward(float meters) {
     /*Serial.print(intrToGo);
     Serial.print(" LB:");
     Serial.println(left_intr);*/
-    analogWrite(9, 0);
-    analogWrite(10, 210);
-    analogWrite(11, 0);
-    analogWrite(12, 250);
+    analogWrite(25, 0);
+    analogWrite(26, 210);
+    analogWrite(27, 0);
+    analogWrite(13, 255);
     return isCompited;
   } else {
     Stop();
@@ -387,35 +423,35 @@ bool Backward(float meters) {
   }
 }
 void Left() {
-  analogWrite(9, 210);
-  analogWrite(10, 0);
-  analogWrite(11, 0);
-  analogWrite(12, 250);
+  analogWrite(25, 210);
+  analogWrite(26, 0);
+  analogWrite(27, 0);
+  analogWrite(13, 255);
 }
 
 void Left(int pwr) {
-  analogWrite(9, pwr);
-  analogWrite(10, 0);
-  analogWrite(11, 0);
-  analogWrite(12, pwr);
+  analogWrite(25, pwr);
+  analogWrite(26, 0);
+  analogWrite(27, 0);
+  analogWrite(13, pwr);
 }
 void Right() {
-  analogWrite(9, 0);
-  analogWrite(10, 210);
-  analogWrite(11, 250);
-  analogWrite(12, 0);
+  analogWrite(25, 0);
+  analogWrite(26, 210);
+  analogWrite(27, 255);
+  analogWrite(13, 0);
 }
 void Right(int pwr) {
-  analogWrite(9, 0);
-  analogWrite(10, pwr);
-  analogWrite(11, pwr);
-  analogWrite(12, 0);
+  analogWrite(25, 0);
+  analogWrite(26, pwr);
+  analogWrite(27, pwr);
+  analogWrite(13, 0);
 }
 void Stop() {
-  analogWrite(9, 0);
-  analogWrite(10, 0);
-  analogWrite(12, 0);
-  analogWrite(11, 0);
+  analogWrite(25, 0);
+  analogWrite(26, 0);
+  analogWrite(13, 0);
+  analogWrite(27, 0);
   //delay(100);
   xCoord = xCoordNew;
   yCoord = yCoordNew;
@@ -424,27 +460,4 @@ void Stop() {
   //nextDist = 0;
 }
 
-void Left_ISR() {
-  left_intr++;
-  rotL++;
-  delay(2);
-}
-void Right_ISR() {
-  right_intr++;
-  rotR++;
-  delay(2);
-}
-void H_ISR() {
-  int t = millis() - tmr_Lidar;
-  if (t > 2000) {
-    timeTo360 = t;
-    h_intr++;
-    loop_starts = true;
-    delta = 9;  //360 / (timeTo360 / lox_del);//360 / (timeTo360 / lox_del);
-    rotations += 1;
-    angle = 360;
-    angle2 = 180;
 
-    tmr_Lidar = millis();
-  }
-}
