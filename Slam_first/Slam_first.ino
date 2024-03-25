@@ -29,8 +29,8 @@ float delta = 0;
 float angle = 0;
 float angle2 = 180;
 
-long tmr_start;
-long tmr_Lidar;
+unsigned long tmr_start;
+unsigned long tmr_Lidar;
 float lox_del = 0;
 bool loop_starts = false;
 int rotations = 0;
@@ -51,7 +51,7 @@ char inChar;
 
 float gyroAngle = 0;
 int x, y, z;
-float left_intr = 0;
+int left_intr = 0;
 int right_intr = 0;
 int h_intr = 0;
 unsigned int rotR = 0;
@@ -61,33 +61,73 @@ unsigned long int spdR = 210;
 unsigned long int spdL = 250;
 unsigned int dt = 0;
 
+unsigned long currentTimeR = 0, currentTimeL = 0, previousTimeR = 0, previousTimeL = 0, timeInterval = 1000;
+// задаем свойства ШИМ-сигнала:
+const int freq = 500;
+const int resolution = 8;
+const int RMotorChannel0 = 0;
+const int RMotorChannel1 = 1;
+const int LMotorChannel2 = 2;
+const int LMotorChannel3 = 3;
+
 void Left_ISR() {
-  left_intr++;
-  rotL++;
+  unsigned long currentTime = micros(); // or micros()
+  if (currentTime - previousTimeL > timeInterval) {
+    left_intr++;
+    rotL++;
+    previousTimeL = currentTime;
+  }
   //delay(2);
 }
 void Right_ISR() {
-  right_intr++;
-  rotR++;
+  unsigned long currentTime = micros(); // or micros()
+  if (currentTime - previousTimeR > timeInterval) {
+    right_intr++;
+    rotR++;
+    previousTimeR = currentTime;
+  }
   //delay(2);
 }
-void  H_ISR() {//TODO: переместить вычисление времени между срабатываниями датчика холла в другое место, а то падает ошибка
-  int t = millis() - tmr_Lidar;
-  if (t > 2000) {
+
+volatile unsigned long us, prevPulseUs, pulseUs;
+void H_ISR() {
+  /*unsigned long t = micros() - tmr_Lidar;
+  if (t > 500000) { //было 2000
     timeTo360 = t;
     h_intr++;
     loop_starts = true;
-    delta = 9;  //360 / (timeTo360 / lox_del);//360 / (timeTo360 / lox_del);
+    delta = 9;  //360 / (timeTo360 / lox_del);
     rotations += 1;
     angle = 360;
     angle2 = 180;
-
-    tmr_Lidar = millis();
-  }
+    tmr_Lidar = micros();
+  }*/
+  /*us = micros();
+  unsigned long t = us - pulseUs;
+  if (t > 50000) {  // debounce interval, also determines max rpm
+    prevPulseUs = pulseUs;
+    pulseUs = us;
+    rotations++;
+    timeTo360 = t;
+    h_intr++;
+    loop_starts = true;
+    delta = 9;  //360 / (timeTo360 / lox_del);
+    rotations += 1;
+    angle = 360;
+    angle2 = 180;
+  }*/
+  rotations++;
+  h_intr++;
+  loop_starts = true;
+  delta = 22;  //360 / (timeTo360 / lox_del);
+  rotations += 1;
+  angle = 360;
+  angle2 = 180;
 }
 
 void setup() {
-  Serial.begin(9600);
+  digitalWrite(4, LOW);
+  Serial.begin(115200);
   SerialBT.begin("ESP32");            //имя, которое будет отобрааться для других устройств
   I2C_1.begin(SDA_1, SCL_1, 400000);  // SDA pin 21, SCL pin 22 TTGO TQ
   I2C_2.begin(SDA_2, SCL_2, 400000);  // SDA2 pin 18, SCL2 pin 19
@@ -129,9 +169,8 @@ void setup() {
   lox2.setMeasurementTimingBudgetMicroSeconds(20000);
   lox2.startRangeContinuous();
   Serial.println("second VL53L0X started");
-
+  
   delay(1000);//задержка нобходима для корректной инициализации датчиков по i2c
-
   digitalWrite(4, HIGH);//если лидар правильно инициализировался, то начинает вращаться
   pinMode(36, INPUT_PULLUP);
   pinMode(39, INPUT_PULLUP);
@@ -139,6 +178,14 @@ void setup() {
   attachInterrupt(36, Left_ISR, RISING);   //функция Left_ISR будет вызываться когда будет поступать прерывание от левого колеса
   attachInterrupt(39, Right_ISR, RISING);  //функция Right_ISR будет вызываться когда будет поступать прерывание от правого колеса
   attachInterrupt(23, H_ISR, RISING);//обработка прерываний для лидара
+  ledcSetup(RMotorChannel0, freq, resolution);
+  ledcSetup(RMotorChannel1, freq, resolution);
+  ledcSetup(LMotorChannel2, freq, resolution);
+  ledcSetup(LMotorChannel3, freq, resolution);
+  ledcAttachPin(25, RMotorChannel0);
+  ledcAttachPin(26, RMotorChannel1);
+  ledcAttachPin(27, LMotorChannel2);
+  ledcAttachPin(13, LMotorChannel3);
 }
 
 String getValue(String data, char separator, int index) {
@@ -169,8 +216,8 @@ void loop() {
     float part01 = getValue(inString, ' ', 0).toFloat();
     float part02 = getValue(inString, ' ', 1).toFloat();
 
-    /*SerialBT.println(part01);
-      SerialBT.println(part02);*/
+    //SerialBT.println(part01);
+    //SerialBT.println(part02);
     GetVector(part01, part02);
     currentX = xCoord;
     currentY = yCoord;
@@ -200,11 +247,11 @@ void GetVector(float x, float y) {
 }
 
 void MoveTo() {
-  /*Serial.print("newRobotAngle: "); Serial.print(newRobotAngle);
-  Serial.print(" robotAngle: "); Serial.print(robotAngle);
+  //Serial.print("newRobotAngle: "); Serial.print(newRobotAngle);
+  //Serial.print(" robotAngle: "); Serial.print(robotAngle);
 
-  Serial.print(" gyroAngle: "); Serial.print(gyroAngle);
-  Serial.print(" nextDist: "); Serial.print(nextDist);
+  //Serial.print(" gyroAngle: "); Serial.println(gyroAngle);
+  /*Serial.print(" nextDist: "); Serial.print(nextDist);
 
   Serial.print(" xCoord: "); Serial.print(xCoord);
   Serial.print(" yCoord: "); Serial.print(yCoord);
@@ -238,13 +285,13 @@ void MoveTo() {
 }
 
 void GetLidarData() {
-  tmr_start = millis();
   lox.rangingTest(&measure, false);
   lox2.rangingTest(&measure2, false);
   if (rotations > 1) {
     if (measure.RangeStatus != 4 && (measure.RangeMilliMeter / 10 - 3) < 150) {  // если дальномер не ответил, то ничего не пишем в порт
       mapX1 = currentX + (measure.RangeMilliMeter / 10 - 3) * cos(angle + 180);
       mapY1 = currentY + (measure.RangeMilliMeter / 10 - 3) * sin(angle + 180);
+      Serial.println(int(measure.RangeMilliMeter / 10 - 3));
       SerialBT.print(int(measure.RangeMilliMeter / 10 - 3));  //int(measure.RangeMilliMeter / 10 - 3)
       SerialBT.print("\t ");
       SerialBT.print(int(angle));  //int(angle)
@@ -267,10 +314,10 @@ void GetLidarData() {
       mapX2 = currentX + (measure2.RangeMilliMeter / 10 - 3) * cos(angle);
       mapY2 = currentY + (measure2.RangeMilliMeter / 10 - 3) * sin(angle);
 
-      SerialBT.print(int(measure2.RangeMilliMeter / 10));  //int(measure2.RangeMilliMeter / 10 - 3)
+      /*SerialBT.print(int(measure2.RangeMilliMeter / 10));  //int(measure2.RangeMilliMeter / 10 - 3)
       SerialBT.print("\t ");
       SerialBT.print(int(angle2));  //int(angle-180)
-      SerialBT.println("\t ");
+      SerialBT.println("\t ");*/
       //lidarData[(int)angle] = measure2.RangeMilliMeter/ 10 - 3;
       /*SerialBT.print(mapX2);
       SerialBT.print("\t ");
@@ -287,8 +334,9 @@ void GetLidarData() {
     angle -= delta;
     angle2 -= delta;
     if (angle2 < 0) angle2 = 360;
+
+    //lox_del = millis();
   }
-  lox_del = millis() - tmr_start;
 }
 
 void UpdateGyroKompas() {
@@ -335,8 +383,6 @@ void Action(char act, float val) {
       Stop();
   }
 }
-
-
 
 void GoToAngle(float angle) {
 
@@ -391,10 +437,10 @@ bool Forward(float meters) {
       if (dir) spdL = 255 / rotation;
       else spdR = 255 / rotation;
     }
-    analogWrite(25, spdR);
-    analogWrite(26, 0);
-    analogWrite(27, spdL);
-    analogWrite(13, 0);
+    ledcWrite(RMotorChannel0, spdR);
+    ledcWrite(RMotorChannel1, 0);
+    ledcWrite(LMotorChannel2, spdL);
+    ledcWrite(LMotorChannel3, 0);
     return isCompited;
   } else {
     nextDist = 0;
@@ -411,10 +457,10 @@ bool Backward(float meters) {
     /*Serial.print(intrToGo);
     Serial.print(" LB:");
     Serial.println(left_intr);*/
-    analogWrite(25, 0);
-    analogWrite(26, 210);
-    analogWrite(27, 0);
-    analogWrite(13, 255);
+    ledcWrite(RMotorChannel0, 0);
+    ledcWrite(RMotorChannel1, 210);
+    ledcWrite(LMotorChannel2, 0);
+    ledcWrite(LMotorChannel3, 255);
     return isCompited;
   } else {
     Stop();
@@ -423,35 +469,34 @@ bool Backward(float meters) {
   }
 }
 void Left() {
-  analogWrite(25, 210);
-  analogWrite(26, 0);
-  analogWrite(27, 0);
-  analogWrite(13, 255);
+  ledcWrite(RMotorChannel0, 210);
+  ledcWrite(RMotorChannel1, 0);
+  ledcWrite(LMotorChannel2, 0);
+  ledcWrite(LMotorChannel3, 255);
 }
-
 void Left(int pwr) {
-  analogWrite(25, pwr);
-  analogWrite(26, 0);
-  analogWrite(27, 0);
-  analogWrite(13, pwr);
+  ledcWrite(RMotorChannel0, pwr);
+  ledcWrite(RMotorChannel1, 0);
+  ledcWrite(LMotorChannel2, 0);
+  ledcWrite(LMotorChannel3, pwr);
 }
 void Right() {
-  analogWrite(25, 0);
-  analogWrite(26, 210);
-  analogWrite(27, 255);
-  analogWrite(13, 0);
+  ledcWrite(RMotorChannel0, 0);
+  ledcWrite(RMotorChannel1, 210);
+  ledcWrite(LMotorChannel2, 255);
+  ledcWrite(LMotorChannel3, 0);
 }
 void Right(int pwr) {
-  analogWrite(25, 0);
-  analogWrite(26, pwr);
-  analogWrite(27, pwr);
-  analogWrite(13, 0);
+  ledcWrite(RMotorChannel0, 0);
+  ledcWrite(RMotorChannel1, pwr);
+  ledcWrite(LMotorChannel2, pwr);
+  ledcWrite(LMotorChannel3, 0);
 }
 void Stop() {
-  analogWrite(25, 0);
-  analogWrite(26, 0);
-  analogWrite(13, 0);
-  analogWrite(27, 0);
+  ledcWrite(RMotorChannel0, 0);
+  ledcWrite(RMotorChannel1, 0);
+  ledcWrite(LMotorChannel3, 0);
+  ledcWrite(LMotorChannel2, 0);
   //delay(100);
   xCoord = xCoordNew;
   yCoord = yCoordNew;
