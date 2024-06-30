@@ -5,7 +5,7 @@
 #endif
 BluetoothSerial SerialBT;
 
-#include<Wire.h>
+#include <Wire.h>
 #define I2C_FREQ 400000
 #define SDA_1 21
 #define SCL_1 22
@@ -17,25 +17,23 @@ TwoWire I2C_2 = TwoWire(1);
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BNO055.h>
 #include <utility/imumaths.h>
-Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x28, &I2C_1); // гироскоп подключен по I2C к 21 и 22 gpio, адррес выставлен подтяжкой к земле
+Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x28, &I2C_1);  // гироскоп подключен по I2C к 21 и 22 gpio, адррес выставлен подтяжкой к земле
 
-#include "Adafruit_VL53L0X.h"
-Adafruit_VL53L0X lox = Adafruit_VL53L0X();//подключаются ко второму I2C, 16 и 17 gpio
-Adafruit_VL53L0X lox2 = Adafruit_VL53L0X();
-VL53L0X_RangingMeasurementData_t measure;
-VL53L0X_RangingMeasurementData_t measure2;
-float mapX1, mapY1, mapX2, mapY2;
-float delta = 0;
-float angle = 0;
-float angle2 = 180;
-
-unsigned long tmr_start;
-unsigned long tmr_Lidar;
-float lox_del = 0;
-bool loop_starts = false;
-int rotations = 0;
-float prevTimer = 0;
-float timeTo360 = 0.0;
+#include "xv_lib.h"
+#define LDS_MOTOR_EN_PIN 4  // LDS enable pin
+#define LDS_MOTOR_PWM_CHANNEL 4
+#define LDS_MOTOR_PWM_BITS 11
+#define LDS_MOTOR_PWM_HZ 30000
+const int SENSOR_TX = 32;
+const int SENSOR_RX = 33;
+void scan_callback(uint16_t, uint16_t, uint16_t, byte);
+void motor_callback(int);
+void packet_callback(uint16_t, byte*, uint16_t);
+XV xv_lds;
+long previousMillis = 0;
+long interval = 5;
+int LDS_Data[4];
+int LDS_Distance[360];
 
 bool isCompited = false;
 byte stage = 0;
@@ -44,7 +42,7 @@ int iter = 0;
 float deltaX = 0, deltaY = 0;
 float xCoordNew = 0, yCoordNew = 0, xCoord = 0, yCoord = 0;  //старое целевое положение робота и старое целевое
 float nextDist = 0.0, robotAngle = 0, newRobotAngle = 0,
-      currentX = 0, currentY = 0;  //положение на координатах в текущий момент
+      currentX = 0.0, currentY = 0.0;  //положение на координатах в текущий момент
 String inString = "";
 long tmr_St = 0;
 char inChar;
@@ -70,8 +68,10 @@ const int RMotorChannel1 = 1;
 const int LMotorChannel2 = 2;
 const int LMotorChannel3 = 3;
 
+byte CurrentMove = 0;  //текущее движение: стоп-0 вперед-1 вправо-2 влево-3
+
 void Left_ISR() {
-  unsigned long currentTime = micros(); // or micros()
+  unsigned long currentTime = micros();  // or micros()
   if (currentTime - previousTimeL > timeInterval) {
     left_intr++;
     rotL++;
@@ -80,7 +80,7 @@ void Left_ISR() {
   //delay(2);
 }
 void Right_ISR() {
-  unsigned long currentTime = micros(); // or micros()
+  unsigned long currentTime = micros();  // or micros()
   if (currentTime - previousTimeR > timeInterval) {
     right_intr++;
     rotR++;
@@ -89,41 +89,6 @@ void Right_ISR() {
   //delay(2);
 }
 
-volatile unsigned long us, prevPulseUs, pulseUs;
-void H_ISR() {
-  /*unsigned long t = micros() - tmr_Lidar;
-  if (t > 500000) { //было 2000
-    timeTo360 = t;
-    h_intr++;
-    loop_starts = true;
-    delta = 9;  //360 / (timeTo360 / lox_del);
-    rotations += 1;
-    angle = 360;
-    angle2 = 180;
-    tmr_Lidar = micros();
-  }*/
-  /*us = micros();
-  unsigned long t = us - pulseUs;
-  if (t > 50000) {  // debounce interval, also determines max rpm
-    prevPulseUs = pulseUs;
-    pulseUs = us;
-    rotations++;
-    timeTo360 = t;
-    h_intr++;
-    loop_starts = true;
-    delta = 9;  //360 / (timeTo360 / lox_del);
-    rotations += 1;
-    angle = 360;
-    angle2 = 180;
-  }*/
-  rotations++;
-  h_intr++;
-  loop_starts = true;
-  delta = 22;  //360 / (timeTo360 / lox_del);
-  rotations += 1;
-  angle = 360;
-  angle2 = 180;
-}
 
 void setup() {
   digitalWrite(4, LOW);
@@ -141,53 +106,36 @@ void setup() {
 
   delay(1000);
   bno.setExtCrystalUse(true);
+  delay(1000);  //задержка нобходима для корректной инициализации датчиков по i2c
 
-  pinMode(4, OUTPUT);   //пин подключения мосфета для мотора лидара
-  pinMode(32, OUTPUT);  //пин для настройки 1-го дальномера
-  pinMode(33, OUTPUT);  //для 2-го дальномера
+  pinMode(LDS_MOTOR_EN_PIN, OUTPUT);
+  ledcAttachChannel(LDS_MOTOR_EN_PIN, LDS_MOTOR_PWM_HZ, LDS_MOTOR_PWM_BITS, LDS_MOTOR_PWM_CHANNEL);
+  ledcWrite(LDS_MOTOR_EN_PIN, 2047);
+  Serial1.begin(115200, SERIAL_8N1, SENSOR_RX, SENSOR_TX);  // XV LDS data
 
-  digitalWrite(33, HIGH);//перевожу дальномер в режим настройка адреса
-  digitalWrite(32, HIGH);
-  delay(10);
-  digitalWrite(33, LOW);
-  delay(10);
-  if (!lox.begin(0x30, false, &I2C_2)) {//присваиваю новый адрес
-    Serial.println("Failed to boot first VL53L0X");
-    while (1)
-      ;
-  }
-  lox.setMeasurementTimingBudgetMicroSeconds(20000);
-  lox.startRangeContinuous();
-  Serial.println("first VL53L0X started");
-  digitalWrite(33, HIGH);
-  delay(10);
-  if (!lox2.begin(0x31, false, &I2C_2)) {
-    Serial.println("Failed to boot second VL53L0X");
-    while (1)
-      ;
-  }
-  lox2.setMeasurementTimingBudgetMicroSeconds(20000);
-  lox2.startRangeContinuous();
-  Serial.println("second VL53L0X started");
-  
-  delay(1000);//задержка нобходима для корректной инициализации датчиков по i2c
-  digitalWrite(4, HIGH);//если лидар правильно инициализировался, то начинает вращаться
+  xv_lds.setScanPointCallback(xv_scan_callback);
+  xv_lds.setMotorPwmCallback(xv_motor_pwm_callback);
+  xv_lds.setPacketCallback(xv_packet_callback);
+  xv_lds.enableMotor(true);
   pinMode(36, INPUT_PULLUP);
   pinMode(39, INPUT_PULLUP);
   pinMode(23, INPUT_PULLUP);
   attachInterrupt(36, Left_ISR, RISING);   //функция Left_ISR будет вызываться когда будет поступать прерывание от левого колеса
   attachInterrupt(39, Right_ISR, RISING);  //функция Right_ISR будет вызываться когда будет поступать прерывание от правого колеса
-  attachInterrupt(23, H_ISR, RISING);//обработка прерываний для лидара
-  ledcSetup(RMotorChannel0, freq, resolution);
-  ledcSetup(RMotorChannel1, freq, resolution);
-  ledcSetup(LMotorChannel2, freq, resolution);
-  ledcSetup(LMotorChannel3, freq, resolution);
-  ledcAttachPin(25, RMotorChannel0);
-  ledcAttachPin(26, RMotorChannel1);
-  ledcAttachPin(27, LMotorChannel2);
-  ledcAttachPin(13, LMotorChannel3);
+  ledcAttachChannel(25, freq, resolution, RMotorChannel0);
+  ledcAttachChannel(26, freq, resolution, RMotorChannel1);
+  ledcAttachChannel(27, freq, resolution, LMotorChannel2);
+  ledcAttachChannel(13, freq, resolution, LMotorChannel3);
 }
 
+
+void loop() {
+  UpdateGyroKompas();
+  GetLidarData();
+  GetCoordinates();
+  MoveTo();
+  //Serial.println(currentX);
+}
 String getValue(String data, char separator, int index) {
   int found = 0;
   int strIndex[] = { 0, -1 };
@@ -203,27 +151,23 @@ String getValue(String data, char separator, int index) {
 
   return found > index ? data.substring(strIndex[0], strIndex[1]) : "";
 }
-
-
-void loop() {
-  UpdateGyroKompas();
-  GetLidarData();
-  if (SerialBT.available())  // Слушаем порт
+void GetCoordinates() {
+  if (Serial.available())  // Слушаем порт
   {
-    char inChar = SerialBT.read();  // Читаем символ с SerialBT модуля
+    //char inChar = Serial.read();  // Читаем символ с SerialBT модуля
     //inString = inString + inChar;  // Переводим Char в String, набираем нужное кол-во символов
-    inString = SerialBT.readStringUntil('\n');
+    //inString = Serial.readStringUntil('\n');
+    inString = Serial.readString();
     float part01 = getValue(inString, ' ', 0).toFloat();
     float part02 = getValue(inString, ' ', 1).toFloat();
 
-    //SerialBT.println(part01);
-    //SerialBT.println(part02);
+    /*Serial.println(part01);
+    Serial.println(part02);*/
     GetVector(part01, part02);
-    currentX = xCoord;
-    currentY = yCoord;
+    /*currentX = xCoord;
+    currentY = yCoord;*/
     inString = "";  // Обнуляем строку
   }
-  MoveTo();
 }
 
 void GetVector(float x, float y) {
@@ -251,9 +195,9 @@ void MoveTo() {
   //Serial.print(" robotAngle: "); Serial.print(robotAngle);
 
   //Serial.print(" gyroAngle: "); Serial.println(gyroAngle);
-  /*Serial.print(" nextDist: "); Serial.print(nextDist);
+  /*Serial.print(" nextDist: "); Serial.print(nextDist);*/
 
-  Serial.print(" xCoord: "); Serial.print(xCoord);
+  /*Serial.print(" xCoord: "); Serial.print(xCoord);
   Serial.print(" yCoord: "); Serial.print(yCoord);
   Serial.print(" currentX: "); Serial.print(currentX);
   Serial.print(" currentY: "); Serial.println(currentY);*/
@@ -285,58 +229,74 @@ void MoveTo() {
 }
 
 void GetLidarData() {
-  lox.rangingTest(&measure, false);
-  lox2.rangingTest(&measure2, false);
-  if (rotations > 1) {
-    if (measure.RangeStatus != 4 && (measure.RangeMilliMeter / 10 - 3) < 150) {  // если дальномер не ответил, то ничего не пишем в порт
-      mapX1 = currentX + (measure.RangeMilliMeter / 10 - 3) * cos(angle + 180);
-      mapY1 = currentY + (measure.RangeMilliMeter / 10 - 3) * sin(angle + 180);
-      Serial.println(int(measure.RangeMilliMeter / 10 - 3));
-      SerialBT.print(int(measure.RangeMilliMeter / 10 - 3));  //int(measure.RangeMilliMeter / 10 - 3)
-      SerialBT.print("\t ");
-      SerialBT.print(int(angle));  //int(angle)
-      SerialBT.println("\t ");
-      /*SerialBT.print(int(mapX1));
-      SerialBT.print("\t ");
-      SerialBT.print(int(mapY1));
-      SerialBT.println("\t ");*/
-      /*SerialBT.print(0);//int(measure.RangeMilliMeter / 10 - 3)
-      SerialBT.print("\t ");
-      SerialBT.print(0);//int(angle)
-      SerialBT.print("\t ");
-      SerialBT.print(int(measure2.RangeMilliMeter / 10 - 3));//int(measure2.RangeMilliMeter / 10 - 3)
-      SerialBT.print("\t ");
-      SerialBT.print(int(map(angle, 0, 360, 360, 0)));//int(angle-180)
-      SerialBT.println("\t ");*/
-      //Serial.print(" ");
-    }
-    if (measure2.RangeStatus != 4 && (measure2.RangeMilliMeter / 10) < 150) {
-      mapX2 = currentX + (measure2.RangeMilliMeter / 10 - 3) * cos(angle);
-      mapY2 = currentY + (measure2.RangeMilliMeter / 10 - 3) * sin(angle);
-
-      /*SerialBT.print(int(measure2.RangeMilliMeter / 10));  //int(measure2.RangeMilliMeter / 10 - 3)
-      SerialBT.print("\t ");
-      SerialBT.print(int(angle2));  //int(angle-180)
-      SerialBT.println("\t ");*/
-      //lidarData[(int)angle] = measure2.RangeMilliMeter/ 10 - 3;
-      /*SerialBT.print(mapX2);
-      SerialBT.print("\t ");
-      SerialBT.println(mapY2);*/
-      //Serial.println(measure2.RangeMilliMeter / 10 - 3);
-    }
-    //SerialBT.println();
-    /*Serial.print(" \t");
-    Serial.print(angle);
-    Serial.print(" \t");
-    Serial.print(delta);
-    Serial.print(" \t");
-    Serial.println(timeTo360);*/
-    angle -= delta;
-    angle2 -= delta;
-    if (angle2 < 0) angle2 = 360;
-
-    //lox_del = millis();
+  while (Serial1.available() > 0) {  // read byte from LDS
+    xv_lds.processByte(Serial1.read());
   }
+  if (!xv_lds.loop()) {
+    // LDS motor error
+    //Serial.println("LDS motor error");
+    //xv_lds.enableMotor(false);
+  }
+  unsigned long currentMillis = millis();
+  if (currentMillis - previousMillis > interval) {
+    previousMillis = currentMillis;
+    if (LDS_Data[3] == 0) {
+      /*SerialBT.print(LDS_Data[0]);
+        SerialBT.print("\t");
+        SerialBT.println(LDS_Data[1]);*/
+      /*Serial.print(LDS_Data[0]);  //distance_mm
+      Serial.print("\t");
+      Serial.println(LDS_Data[1]);  //angle_deg*/
+      
+        SerialBT.print(int(cos((LDS_Data[1] + gyroAngle) * 0.017) * LDS_Data[0] + currentX*100));
+      SerialBT.print("\t");
+      SerialBT.println(int(sin((LDS_Data[1] + gyroAngle) * 0.017) * LDS_Data[0] + currentY*100));
+      
+      
+      /*Serial.print("ANG ");Serial.print(LDS_Data[0]); Serial.print("\t");
+      Serial.print("DIST ");Serial.print(LDS_Data[1]); Serial.print("\t");
+      Serial.print("QUAL ");Serial.print(LDS_Data[2]); Serial.print("\t");
+      Serial.print("ERR ");Serial.println(LDS_Data[3]);*/
+    }
+  }
+}
+void xv_scan_callback(uint16_t angle_deg, uint16_t distance_mm,
+                      uint16_t quality, byte err) {
+  LDS_Data[0] = distance_mm/10;
+  LDS_Data[1] = angle_deg;
+  LDS_Data[2] = quality;
+  LDS_Data[3] = err;
+  if (err == 0) {
+    LDS_Distance[angle_deg] = distance_mm;
+  }
+  /*Serial.print(angle_deg);
+  Serial.print(" ");
+  Serial.print(distance_mm);
+  Serial.print(" ");
+  Serial.print(quality);
+  Serial.print(" ");
+  Serial.println(err);*/
+  /*Serial.print(" ");
+  Serial.println(xv_lds.getScanRPM());*/
+}
+void xv_motor_pwm_callback(float pwm) {
+
+  /*Serial.print("Motor callback ");
+  Serial.print(xv_lds.getScanRPM());
+  Serial.print(" ");
+  Serial.print(pwm);
+  Serial.print(" ");*/
+  int pwm_value = ((1 << LDS_MOTOR_PWM_BITS) - 1) * pwm;
+  ledcWrite(LDS_MOTOR_EN_PIN, pwm_value);
+  //Serial.println(pwm_value);
+}
+void xv_packet_callback(uint16_t starting_angle_deg, byte* packet, uint16_t length) {
+  /*Serial.print(starting_angle_deg);
+  Serial.print(" ");
+  Serial.print(length);
+  Serial.print(" ");
+  Serial.println(xv_lds.getScanRPM());*/
+  //Serial.write(packet, length); // dump raw data
 }
 
 void UpdateGyroKompas() {
@@ -385,40 +345,40 @@ void Action(char act, float val) {
 }
 
 void GoToAngle(float angle) {
+    int rotation = gyroAngle - angle;  //359-0=359
+    bool dir = true;                   //left
 
-  int rotation = gyroAngle - angle;  //359-0=359
-  bool dir = true;                   //left
+    if (rotation < 0)
+      rotation = rotation + 360;
 
-  if (rotation < 0)
-    rotation = rotation + 360;
-
-  if (rotation >= 180) {        //359 > 180
-    dir = false;                //right
-    rotation = 360 - rotation;  // 360-359=1°
-  }
-  if (rotation > 1) {
-    if (rotation > 1 && rotation < 10) {  // уменьшаю мощность, чтобы не развернуться больше необходимого
-      if (dir) Left(100);
-      else Right(100);
-    } else {
-      if (dir) Left(120);
-      else Right(120);
+    if (rotation >= 180) {        //359 > 180
+      dir = false;                //right
+      rotation = 360 - rotation;  // 360-359=1°
     }
-
-  } else {
+    if (rotation > 1) {
+      if (rotation > 1 && rotation < 10) {  // уменьшаю мощность, чтобы не развернуться больше необходимого
+        if (dir) Left(120);
+        else Right(120);
+      } else {
+        if (dir) Left(255);
+        else Right(255);
+      }
+    }
+   else {
     Stop();
     isCompited = true;
   }
 }
 
 bool Forward(float meters) {
-  int intrToGo = meters * 298;
+  int intrToGo = meters * 210;
   float rotation = gyroAngle - newRobotAngle;  //359-0=359
   bool dir = true;                             //left
 
   if (intrToGo - 1 > left_intr) {
-    currentX = xCoord + (left_intr / 298) * cos(radians(robotAngle));
-    currentY = yCoord + (left_intr / 298) * sin(radians(robotAngle));
+    float left_intr_float = left_intr;
+    currentX = xCoord + (left_intr_float / 210) * cos(radians(robotAngle));
+    currentY = yCoord + (left_intr_float / 210) * sin(radians(robotAngle));
     isCompited = false;
     spdL = 255;
     spdR = 255;
@@ -426,6 +386,7 @@ bool Forward(float meters) {
     Serial.print(" LF:");
     Serial.println(left_intr);
     */
+    
     if (rotation < 0)
       rotation = rotation + 360;
 
@@ -437,10 +398,10 @@ bool Forward(float meters) {
       if (dir) spdL = 255 / rotation;
       else spdR = 255 / rotation;
     }
-    ledcWrite(RMotorChannel0, spdR);
-    ledcWrite(RMotorChannel1, 0);
-    ledcWrite(LMotorChannel2, spdL);
-    ledcWrite(LMotorChannel3, 0);
+    ledcWrite(25, spdR);
+    ledcWrite(26, 0);
+    ledcWrite(27, spdL);
+    ledcWrite(13, 0);
     return isCompited;
   } else {
     nextDist = 0;
@@ -457,10 +418,10 @@ bool Backward(float meters) {
     /*Serial.print(intrToGo);
     Serial.print(" LB:");
     Serial.println(left_intr);*/
-    ledcWrite(RMotorChannel0, 0);
-    ledcWrite(RMotorChannel1, 210);
-    ledcWrite(LMotorChannel2, 0);
-    ledcWrite(LMotorChannel3, 255);
+    ledcWrite(25, 0);
+    ledcWrite(26, 210);
+    ledcWrite(27, 0);
+    ledcWrite(13, 255);
     return isCompited;
   } else {
     Stop();
@@ -469,34 +430,34 @@ bool Backward(float meters) {
   }
 }
 void Left() {
-  ledcWrite(RMotorChannel0, 210);
-  ledcWrite(RMotorChannel1, 0);
-  ledcWrite(LMotorChannel2, 0);
-  ledcWrite(LMotorChannel3, 255);
+  ledcWrite(25, 210);
+  ledcWrite(26, 0);
+  ledcWrite(27, 0);
+  ledcWrite(13, 255);
 }
 void Left(int pwr) {
-  ledcWrite(RMotorChannel0, pwr);
-  ledcWrite(RMotorChannel1, 0);
-  ledcWrite(LMotorChannel2, 0);
-  ledcWrite(LMotorChannel3, pwr);
+  ledcWrite(25, pwr);
+  ledcWrite(26, 0);
+  ledcWrite(27, 0);
+  ledcWrite(13, pwr);
 }
 void Right() {
-  ledcWrite(RMotorChannel0, 0);
-  ledcWrite(RMotorChannel1, 210);
-  ledcWrite(LMotorChannel2, 255);
-  ledcWrite(LMotorChannel3, 0);
+  ledcWrite(25, 0);
+  ledcWrite(26, 210);
+  ledcWrite(27, 255);
+  ledcWrite(13, 0);
 }
 void Right(int pwr) {
-  ledcWrite(RMotorChannel0, 0);
-  ledcWrite(RMotorChannel1, pwr);
-  ledcWrite(LMotorChannel2, pwr);
-  ledcWrite(LMotorChannel3, 0);
+  ledcWrite(25, 0);
+  ledcWrite(26, pwr);
+  ledcWrite(27, pwr);
+  ledcWrite(13, 0);
 }
 void Stop() {
-  ledcWrite(RMotorChannel0, 0);
-  ledcWrite(RMotorChannel1, 0);
-  ledcWrite(LMotorChannel3, 0);
-  ledcWrite(LMotorChannel2, 0);
+  ledcWrite(25, 0);
+  ledcWrite(26, 0);
+  ledcWrite(13, 0);
+  ledcWrite(27, 0);
   //delay(100);
   xCoord = xCoordNew;
   yCoord = yCoordNew;
@@ -504,5 +465,3 @@ void Stop() {
   left_intr = 0;
   //nextDist = 0;
 }
-
-
